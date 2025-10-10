@@ -1558,7 +1558,7 @@ export const StakingHistory: React.FC<{ userAddress: string }> = ({
         </button>
         <button
           className={actionFilter?.includes('CLAIM') ? 'active' : ''}
-          onClick={() => setActionFilter(['CLAIM', 'BATCH_CLAIM'])}
+          onClick={() => setActionFilter(['CLAIM'])}  // 只需要 CLAIM
         >
           领取收益
         </button>

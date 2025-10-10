@@ -11,14 +11,29 @@
 当用户调用批处理函数时：
 
 ```solidity
-// 用户调用
+// 示例 1: 批量质押
 batchStake([tokenId1, tokenId2, tokenId3])
-
 // 合约会触发：
-emit NFTStaked(user, tokenId1, level1, timestamp)  // ← STAKE 事件 #1
-emit NFTStaked(user, tokenId2, level2, timestamp)  // ← STAKE 事件 #2
-emit NFTStaked(user, tokenId3, level3, timestamp)  // ← STAKE 事件 #3
-emit BatchStaked(user, [tokenId1, tokenId2, tokenId3], timestamp)  // ← BATCH_STAKE 事件
+emit NFTStaked(user, tokenId1, level1, timestamp)  // ← STAKE #1
+emit NFTStaked(user, tokenId2, level2, timestamp)  // ← STAKE #2
+emit NFTStaked(user, tokenId3, level3, timestamp)  // ← STAKE #3
+emit BatchStaked(user, [tokenId1, tokenId2, tokenId3], timestamp)  // ← BATCH_STAKE
+
+// 示例 2: 批量取消质押
+batchUnstake([tokenId1, tokenId2, tokenId3])
+// 合约会触发：
+emit NFTUnstaked(user, tokenId1, reward1, timestamp)  // ← UNSTAKE #1
+emit NFTUnstaked(user, tokenId2, reward2, timestamp)  // ← UNSTAKE #2
+emit NFTUnstaked(user, tokenId3, reward3, timestamp)  // ← UNSTAKE #3
+emit BatchUnstaked(user, [tokenId1, tokenId2, tokenId3], totalReward, timestamp)  // ← BATCH_UNSTAKE
+
+// 示例 3: 批量领取收益
+batchClaimRewards([tokenId1, tokenId2, tokenId3])
+// 合约会触发：
+emit RewardsClaimed(user, tokenId1, reward1, timestamp)  // ← CLAIM #1
+emit RewardsClaimed(user, tokenId2, reward2, timestamp)  // ← CLAIM #2
+emit RewardsClaimed(user, tokenId3, reward3, timestamp)  // ← CLAIM #3
+emit BatchClaimed(user, [tokenId1, tokenId2, tokenId3], totalReward, timestamp)  // ← BATCH_CLAIM
 ```
 
 ### Subgraph 记录的数据
@@ -36,9 +51,14 @@ emit BatchStaked(user, [tokenId1, tokenId2, tokenId3], timestamp)  // ← BATCH_
 
 | 用途 | 应该查询 | 原因 |
 |------|---------|------|
-| **NFT 级别的历史** | 只查 `STAKE`/`UNSTAKE` | 每个 NFT 一条记录，不重复 ⭐ |
-| **操作次数统计** | 只查 `BATCH_STAKE`/`BATCH_UNSTAKE` | 统计用户点击了多少次 |
+| **NFT 级别的历史** | 只查 `STAKE`/`UNSTAKE`/`CLAIM` | 每个 NFT 一条记录，不重复 ⭐ |
+| **操作次数统计** | 只查 `BATCH_*` 事件 | 统计用户点击了多少次 |
 | **完整事件日志** | 查询所有类型 | 用于调试和审计 |
+
+**推荐做法**：
+- 📊 **展示用户历史**：只用 `STAKE`、`UNSTAKE`、`CLAIM`（避免重复）
+- 📈 **统计操作次数**：只用 `BATCH_STAKE`、`BATCH_UNSTAKE`、`BATCH_CLAIM`
+- 🔍 **调试或审计**：查询所有 6 种类型
 
 ---
 
@@ -62,7 +82,7 @@ type StakingActivity {
 enum StakingAction {
   STAKE           # 单个质押（包括批处理中的每个 NFT）
   UNSTAKE         # 单个取消质押（包括批处理中的每个 NFT）
-  CLAIM           # 领取收益
+  CLAIM           # 单个领取收益（包括批处理中的每个 NFT）
   BATCH_STAKE     # 批量质押汇总事件
   BATCH_UNSTAKE   # 批量取消质押汇总事件
   BATCH_CLAIM     # 批量领取收益汇总事件
@@ -453,8 +473,8 @@ export const StakingHistory: React.FC<StakingHistoryProps> = ({ userAddress }) =
           取消质押
         </button>
         <button
-          className={actionFilter.includes('CLAIM') || actionFilter.includes('BATCH_CLAIM') ? 'active' : ''}
-          onClick={() => setActionFilter(['CLAIM', 'BATCH_CLAIM'])}
+          className={actionFilter.includes('CLAIM') ? 'active' : ''}
+          onClick={() => setActionFilter(['CLAIM'])}  // 只需要 CLAIM
         >
           领取收益
         </button>
@@ -806,9 +826,9 @@ const getStakingStats = (activities: StakingActivity[]) => {
   };
 
   activities.forEach(activity => {
-    // ⚠️ 注意：如果要统计"操作次数"，需要区分批处理
-    // - 如果要统计"用户点击了多少次质押按钮"：只计算 BATCH_STAKE
-    // - 如果要统计"质押了多少个 NFT"：只计算 STAKE（避免重复计数）
+    // ⚠️ 注意：批处理会同时触发单个事件和批处理事件
+    // - 统计 NFT 数量：只计算 STAKE/UNSTAKE/CLAIM（避免重复）
+    // - 统计操作次数：只计算 BATCH_* 事件
     
     if (activity.action === 'STAKE') {
       stats.totalStakes++;  // 统计每个 NFT 的质押
@@ -823,8 +843,8 @@ const getStakingStats = (activities: StakingActivity[]) => {
       }
     }
     
-    if (activity.action === 'CLAIM' || activity.action === 'BATCH_CLAIM') {
-      stats.totalClaims++;
+    if (activity.action === 'CLAIM') {
+      stats.totalClaims++;  // 统计每个 NFT 的领取
       if (activity.amount) {
         stats.totalRewardsCollected += BigInt(activity.amount);
       }
