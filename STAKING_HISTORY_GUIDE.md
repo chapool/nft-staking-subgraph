@@ -2,6 +2,46 @@
 
 完整的用户质押历史查询方案，包括 STAKE、UNSTAKE、CLAIM 等所有活动记录。
 
+## ⚠️ 重要：理解批处理事件与单个事件的关系
+
+**关键概念**：合约在批处理操作时会**同时触发**多个事件！
+
+### 事件触发机制
+
+当用户调用批处理函数时：
+
+```solidity
+// 用户调用
+batchStake([tokenId1, tokenId2, tokenId3])
+
+// 合约会触发：
+emit NFTStaked(user, tokenId1, level1, timestamp)  // ← STAKE 事件 #1
+emit NFTStaked(user, tokenId2, level2, timestamp)  // ← STAKE 事件 #2
+emit NFTStaked(user, tokenId3, level3, timestamp)  // ← STAKE 事件 #3
+emit BatchStaked(user, [tokenId1, tokenId2, tokenId3], timestamp)  // ← BATCH_STAKE 事件
+```
+
+### Subgraph 记录的数据
+
+因此 Subgraph 会创建**4 条** `StakingActivity` 记录：
+
+```
+1. { action: "STAKE", tokenIds: [tokenId1], ... }
+2. { action: "STAKE", tokenIds: [tokenId2], ... }
+3. { action: "STAKE", tokenIds: [tokenId3], ... }
+4. { action: "BATCH_STAKE", tokenIds: [tokenId1, tokenId2, tokenId3], ... }
+```
+
+### 查询建议
+
+| 用途 | 应该查询 | 原因 |
+|------|---------|------|
+| **NFT 级别的历史** | 只查 `STAKE`/`UNSTAKE` | 每个 NFT 一条记录，不重复 ⭐ |
+| **操作次数统计** | 只查 `BATCH_STAKE`/`BATCH_UNSTAKE` | 统计用户点击了多少次 |
+| **完整事件日志** | 查询所有类型 | 用于调试和审计 |
+
+---
+
 ## 📊 数据结构
 
 ### StakingActivity 实体
@@ -20,12 +60,12 @@ type StakingActivity {
 }
 
 enum StakingAction {
-  STAKE           # 单个质押
-  UNSTAKE         # 单个取消质押
+  STAKE           # 单个质押（包括批处理中的每个 NFT）
+  UNSTAKE         # 单个取消质押（包括批处理中的每个 NFT）
   CLAIM           # 领取收益
-  BATCH_STAKE     # 批量质押
-  BATCH_UNSTAKE   # 批量取消质押
-  BATCH_CLAIM     # 批量领取收益
+  BATCH_STAKE     # 批量质押汇总事件
+  BATCH_UNSTAKE   # 批量取消质押汇总事件
+  BATCH_CLAIM     # 批量领取收益汇总事件
 }
 ```
 
@@ -73,7 +113,15 @@ query GetUserStakingHistory($userAddress: Bytes!) {
 }
 ```
 
-### 2. 只查询质押事件（STAKE + BATCH_STAKE）
+### 2. 只查询质押事件
+
+> ⚠️ **重要说明**：合约在批处理操作时会**同时触发**单个事件和批处理事件。
+> 
+> 例如：`batchStake([1, 2, 3])` 会触发：
+> - 3 个 `NFTStaked` 事件（每个 tokenId 一个）
+> - 1 个 `BatchStaked` 事件（包含所有 tokenIds）
+> 
+> **因此，查询质押记录时只需要 `STAKE` 即可，无需包含 `BATCH_STAKE`**，否则会看到重复的记录。
 
 ```graphql
 query GetUserStakeHistory($userAddress: Bytes!) {
@@ -83,7 +131,7 @@ query GetUserStakeHistory($userAddress: Bytes!) {
     orderDirection: desc
     where: { 
       user: $userAddress
-      action_in: [STAKE, BATCH_STAKE]
+      action_in: [STAKE]  # 只需要 STAKE，批处理会触发多个 STAKE 事件
     }
   ) {
     id
@@ -96,7 +144,13 @@ query GetUserStakeHistory($userAddress: Bytes!) {
 }
 ```
 
-### 3. 只查询取消质押事件（UNSTAKE + BATCH_UNSTAKE）
+### 3. 只查询取消质押事件
+
+> ⚠️ 同样地，`batchUnstake([1, 2, 3])` 会触发：
+> - 3 个 `NFTUnstaked` 事件
+> - 1 个 `BatchUnstaked` 事件
+> 
+> **查询时只需要 `UNSTAKE` 即可。**
 
 ```graphql
 query GetUserUnstakeHistory($userAddress: Bytes!) {
@@ -106,7 +160,7 @@ query GetUserUnstakeHistory($userAddress: Bytes!) {
     orderDirection: desc
     where: { 
       user: $userAddress
-      action_in: [UNSTAKE, BATCH_UNSTAKE]
+      action_in: [UNSTAKE]  # 只需要 UNSTAKE
     }
   ) {
     id
@@ -268,7 +322,7 @@ interface UseStakingHistoryOptions {
 export const useStakingHistory = ({
   userAddress,
   pageSize = 20,
-  actionFilter = ['STAKE', 'UNSTAKE', 'CLAIM', 'BATCH_STAKE', 'BATCH_UNSTAKE', 'BATCH_CLAIM']
+  actionFilter = []  // 默认显示所有（包括 BATCH 事件用于统计）
 }: UseStakingHistoryOptions) => {
   const [page, setPage] = useState(0);
 
@@ -387,14 +441,14 @@ export const StakingHistory: React.FC<StakingHistoryProps> = ({ userAddress }) =
           全部
         </button>
         <button
-          className={actionFilter.includes('STAKE') || actionFilter.includes('BATCH_STAKE') ? 'active' : ''}
-          onClick={() => setActionFilter(['STAKE', 'BATCH_STAKE'])}
+          className={actionFilter.includes('STAKE') ? 'active' : ''}
+          onClick={() => setActionFilter(['STAKE'])}  // 只需要 STAKE，批处理会触发多个 STAKE
         >
           质押
         </button>
         <button
-          className={actionFilter.includes('UNSTAKE') || actionFilter.includes('BATCH_UNSTAKE') ? 'active' : ''}
-          onClick={() => setActionFilter(['UNSTAKE', 'BATCH_UNSTAKE'])}
+          className={actionFilter.includes('UNSTAKE') ? 'active' : ''}
+          onClick={() => setActionFilter(['UNSTAKE'])}  // 只需要 UNSTAKE
         >
           取消质押
         </button>
@@ -725,11 +779,11 @@ curl -X POST \
   }' \
   https://api.studio.thegraph.com/query/960/chapool-nft-staking-stats/v0.0.2
 
-# 只查询质押事件
+# 只查询质押事件（不包含批处理事件，避免重复）
 curl -X POST \
   -H "Content-Type: application/json" \
   -d '{
-    "query": "{ stakingActivities(first: 10, orderBy: timestamp, orderDirection: desc, where: { user: \"0x01692d53f4392273bd2e11eac510832548957304\", action_in: [STAKE, BATCH_STAKE] }) { id action tokenIds level timestamp } }"
+    "query": "{ stakingActivities(first: 10, orderBy: timestamp, orderDirection: desc, where: { user: \"0x01692d53f4392273bd2e11eac510832548957304\", action_in: [STAKE] }) { id action tokenIds level timestamp } }"
   }' \
   https://api.studio.thegraph.com/query/960/chapool-nft-staking-stats/v0.0.2
 ```
@@ -752,14 +806,18 @@ const getStakingStats = (activities: StakingActivity[]) => {
   };
 
   activities.forEach(activity => {
-    if (activity.action === 'STAKE' || activity.action === 'BATCH_STAKE') {
-      stats.totalStakes++;
-      stats.totalNFTsStaked += activity.tokenIds.length;
+    // ⚠️ 注意：如果要统计"操作次数"，需要区分批处理
+    // - 如果要统计"用户点击了多少次质押按钮"：只计算 BATCH_STAKE
+    // - 如果要统计"质押了多少个 NFT"：只计算 STAKE（避免重复计数）
+    
+    if (activity.action === 'STAKE') {
+      stats.totalStakes++;  // 统计每个 NFT 的质押
+      stats.totalNFTsStaked += activity.tokenIds.length;  // 通常是 1
     }
     
-    if (activity.action === 'UNSTAKE' || activity.action === 'BATCH_UNSTAKE') {
-      stats.totalUnstakes++;
-      stats.totalNFTsUnstaked += activity.tokenIds.length;
+    if (activity.action === 'UNSTAKE') {
+      stats.totalUnstakes++;  // 统计每个 NFT 的取消质押
+      stats.totalNFTsUnstaked += activity.tokenIds.length;  // 通常是 1
       if (activity.amount) {
         stats.totalRewardsCollected += BigInt(activity.amount);
       }

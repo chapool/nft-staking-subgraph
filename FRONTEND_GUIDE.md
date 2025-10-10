@@ -1346,6 +1346,10 @@ query GetUserStakingHistory($userAddress: Bytes!) {
 
 #### 只查询质押事件
 
+> ⚠️ **注意**：批处理操作会同时触发单个事件和批处理事件。
+> 例如 `batchStake([1,2,3])` 会触发 3 个 `STAKE` 事件 + 1 个 `BATCH_STAKE` 事件。
+> 查询质押历史时只需要 `STAKE` 即可，避免重复记录。
+
 ```graphql
 query GetUserStakeHistory($userAddress: Bytes!) {
   stakingActivities(
@@ -1354,7 +1358,7 @@ query GetUserStakeHistory($userAddress: Bytes!) {
     orderDirection: desc
     where: { 
       user: $userAddress
-      action_in: [STAKE, BATCH_STAKE]
+      action_in: [STAKE]  # 只需要 STAKE，批处理会触发多个 STAKE
     }
   ) {
     id
@@ -1377,7 +1381,7 @@ query GetUserUnstakeHistory($userAddress: Bytes!) {
     orderDirection: desc
     where: { 
       user: $userAddress
-      action_in: [UNSTAKE, BATCH_UNSTAKE]
+      action_in: [UNSTAKE]  # 只需要 UNSTAKE
     }
   ) {
     id
@@ -1542,13 +1546,13 @@ export const StakingHistory: React.FC<{ userAddress: string }> = ({
         </button>
         <button
           className={actionFilter?.includes('STAKE') ? 'active' : ''}
-          onClick={() => setActionFilter(['STAKE', 'BATCH_STAKE'])}
+          onClick={() => setActionFilter(['STAKE'])}  // 只需要 STAKE
         >
           质押
         </button>
         <button
           className={actionFilter?.includes('UNSTAKE') ? 'active' : ''}
-          onClick={() => setActionFilter(['UNSTAKE', 'BATCH_UNSTAKE'])}
+          onClick={() => setActionFilter(['UNSTAKE'])}  // 只需要 UNSTAKE
         >
           取消质押
         </button>
