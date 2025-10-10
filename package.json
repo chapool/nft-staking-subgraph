@@ -1,0 +1,18 @@
+{
+  "name": "nft-staking-stats",
+  "version": "0.1.0",
+  "description": "NFT Staking Subgraph",
+  "scripts": {
+    "codegen": "graph codegen",
+    "build": "graph build",
+    "deploy": "graph deploy --studio nft-staking-stats",
+    "create-local": "graph create --node http://localhost:8020/ nft-staking-stats",
+    "remove-local": "graph remove --node http://localhost:8020/ nft-staking-stats",
+    "deploy-local": "graph deploy --node http://localhost:8020/ --ipfs http://localhost:5001 nft-staking-stats"
+  },
+  "dependencies": {
+    "@graphprotocol/graph-cli": "^0.79.0",
+    "@graphprotocol/graph-ts": "^0.35.0"
+  }
+}
+

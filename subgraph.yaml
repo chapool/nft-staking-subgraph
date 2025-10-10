@@ -1,0 +1,37 @@
+specVersion: 0.0.5
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: Staking
+    network: sepolia
+    source:
+      address: "0x51a07dE2Bd277F0E6412452e3B54982Fc32CA6E5"
+      abi: Staking
+      startBlock: 9379580  # 合约实际部署的区块号
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      entities:
+        - User
+        - UserHourlyStats
+        - UserDailyStats
+        - StakingActivity
+        - GlobalStats
+      abis:
+        - name: Staking
+          file: ./abis/Staking.json
+      eventHandlers:
+        - event: NFTStaked(indexed address,indexed uint256,uint8,uint256)
+          handler: handleNFTStaked
+        - event: NFTUnstaked(indexed address,indexed uint256,uint256,uint256)
+          handler: handleNFTUnstaked
+        - event: RewardsClaimed(indexed address,indexed uint256,uint256,uint256)
+          handler: handleRewardsClaimed
+        - event: BatchStaked(indexed address,uint256[],uint256)
+          handler: handleBatchStaked
+        - event: BatchUnstaked(indexed address,uint256[],uint256,uint256)
+          handler: handleBatchUnstaked
+      file: ./src/mapping.ts
+

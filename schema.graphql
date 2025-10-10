@@ -1,0 +1,118 @@
+"""
+用户实体 - 存储用户的总体统计信息
+"""
+type User @entity(immutable: false) {
+  id: ID!                                    # 用户地址（小写）
+  address: Bytes!                            # 用户地址
+  totalStaked: BigInt!                       # 当前质押总数
+  totalStakedAllTime: BigInt!                # 历史总质押数
+  totalUnstaked: BigInt!                     # 历史解质押总数
+  totalRewardsClaimed: BigInt!               # 历史总收益（wei）
+  totalRewardsClaimedDecimal: BigDecimal!    # 历史总收益（格式化为 ETH）
+  firstStakeTimestamp: BigInt!               # 首次质押时间
+  lastActivityTimestamp: BigInt!             # 最后活动时间
+  
+  # 关联关系
+  hourlyStats: [UserHourlyStats!]! @derivedFrom(field: "user")
+  dailyStats: [UserDailyStats!]! @derivedFrom(field: "user")
+  activities: [StakingActivity!]! @derivedFrom(field: "user")
+}
+
+"""
+用户小时统计 - 每小时的用户活动统计
+用于绘制小时级别的时间趋势图
+"""
+type UserHourlyStats @entity(immutable: false) {
+  id: ID!                                    # {userAddress}-{hourTimestamp}
+  user: User!                                # 关联用户
+  hour: BigInt!                              # 小时时间戳（对齐到整点）
+  hourStartString: String!                   # 小时字符串，例如 "2025-01-09 10:00"
+  
+  # 该小时的增量数据
+  stakedCount: BigInt!                       # 该小时质押数量
+  unstakedCount: BigInt!                     # 该小时解质押数量
+  rewardsClaimed: BigInt!                    # 该小时领取的收益（wei）
+  rewardsClaimedDecimal: BigDecimal!         # 该小时收益（格式化）
+  
+  # 该小时结束时的累计数据（用于绘制累计趋势图）
+  cumulativeStaked: BigInt!                  # 截至该小时的累计质押数
+  cumulativeUnstaked: BigInt!                # 截至该小时的累计解质押数
+  cumulativeRewards: BigInt!                 # 截至该小时的累计收益
+  netStaked: BigInt!                         # 净质押数（质押 - 解质押）
+  
+  # 各等级统计
+  levelStats: [UserHourlyLevelStat!]! @derivedFrom(field: "hourlyStats")
+}
+
+"""
+用户小时等级统计 - 按 NFT 等级细分的统计
+"""
+type UserHourlyLevelStat @entity(immutable: false) {
+  id: ID!                                    # {userHourlyStatsId}-{level}
+  hourlyStats: UserHourlyStats!
+  level: Int!                                # NFT等级 (1-6: C, B, A, S, SS, SSS)
+  
+  stakedCount: BigInt!                       # 该等级质押数
+  unstakedCount: BigInt!                     # 该等级解质押数
+  currentStaked: BigInt!                     # 该等级当前质押数
+}
+
+"""
+用户日统计 - 每天的汇总数据
+用于绘制日级别的时间趋势图（30天、90天范围）
+"""
+type UserDailyStats @entity(immutable: false) {
+  id: ID!                                    # {userAddress}-{dayTimestamp}
+  user: User!
+  day: BigInt!                               # 天时间戳（对齐到0点）
+  dayString: String!                         # 日期字符串，例如 "2025-01-09"
+  
+  # 当天的增量数据
+  stakedCount: BigInt!
+  unstakedCount: BigInt!
+  rewardsClaimed: BigInt!
+  rewardsClaimedDecimal: BigDecimal!
+  
+  # 当天结束时的累计数据
+  cumulativeStaked: BigInt!
+  cumulativeUnstaked: BigInt!
+  cumulativeRewards: BigInt!
+  netStaked: BigInt!
+}
+
+"""
+质押活动记录 - 每次操作的详细记录
+用于审计和详细数据查询
+"""
+type StakingActivity @entity(immutable: true) {
+  id: ID!                                    # {txHash}-{logIndex}
+  user: User!
+  action: StakingAction!                     # 操作类型
+  tokenIds: [BigInt!]!                       # 涉及的 NFT IDs
+  level: Int                                 # NFT等级（单个质押时）
+  amount: BigInt                             # 金额（解质押/领取时的收益）
+  
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+enum StakingAction {
+  STAKE
+  UNSTAKE
+  CLAIM
+  BATCH_STAKE
+  BATCH_UNSTAKE
+  BATCH_CLAIM
+}
+
+"""
+全局统计 - 平台总体数据
+"""
+type GlobalStats @entity(immutable: false) {
+  id: ID!                                    # 固定为 "global"
+  totalUsers: BigInt!                        # 总用户数
+  totalStaked: BigInt!                       # 总质押数
+  totalRewardsPaid: BigInt!                  # 总发放收益
+}
+
