@@ -1213,7 +1213,10 @@ const chartData = hourlyStats.map(stat => ({
    - Pending 没有事件，无法记录历史快照
 
 3. **除非**：
-   - 合约每小时触发一次快照事件（需要 Chainlink Automation，成本高）
+   - 合约每小时为**每个用户**触发快照事件（需要 Chainlink Automation）
+     - ⚠️ 成本极高：10,000 用户 = 每月 $21,600+
+     - ⚠️ 随用户增长，成本线性增长
+     - ⚠️ 不可持续，不推荐
    - 或者你在过去就开始记录 pending（现在已经来不及了）
 
 **✅ 正确的图表方案**：
