@@ -1178,6 +1178,557 @@ const totalRewards = claimedRewards + pendingRewards;
 
 ---
 
+## 📜 第九步：查询用户质押历史
+
+除了图表统计，您还可以查询用户的详细质押历史记录，包括所有 STAKE、UNSTAKE、CLAIM 事件。
+
+### 9.1 数据结构
+
+```typescript
+interface StakingActivity {
+  id: string;                 // 唯一ID: {txHash}-{logIndex}
+  action: StakingAction;      // 操作类型
+  tokenIds: string[];         // 涉及的 NFT Token IDs
+  level: number | null;       // NFT等级 (1-6: C, B, A, S, SS, SSS)
+  amount: string | null;      // 金额（unstake/claim时的收益，wei）
+  timestamp: string;          // 时间戳
+  blockNumber: string;        // 区块号
+  transactionHash: string;    // 交易哈希
+}
+
+type StakingAction = 
+  | 'STAKE'          // 单个质押
+  | 'UNSTAKE'        // 单个取消质押
+  | 'CLAIM'          // 领取收益
+  | 'BATCH_STAKE'    // 批量质押
+  | 'BATCH_UNSTAKE'  // 批量取消质押
+  | 'BATCH_CLAIM';   // 批量领取收益
+```
+
+### 9.2 GraphQL 查询示例
+
+#### 查询所有历史（最近20条）
+
+```graphql
+query GetUserStakingHistory($userAddress: Bytes!) {
+  stakingActivities(
+    first: 20
+    orderBy: timestamp
+    orderDirection: desc
+    where: { user: $userAddress }
+  ) {
+    id
+    action
+    tokenIds
+    level
+    amount
+    timestamp
+    blockNumber
+    transactionHash
+  }
+}
+```
+
+#### 只查询质押事件
+
+```graphql
+query GetUserStakeHistory($userAddress: Bytes!) {
+  stakingActivities(
+    first: 50
+    orderBy: timestamp
+    orderDirection: desc
+    where: { 
+      user: $userAddress
+      action_in: [STAKE, BATCH_STAKE]
+    }
+  ) {
+    id
+    action
+    tokenIds
+    level
+    timestamp
+    transactionHash
+  }
+}
+```
+
+#### 只查询取消质押事件
+
+```graphql
+query GetUserUnstakeHistory($userAddress: Bytes!) {
+  stakingActivities(
+    first: 50
+    orderBy: timestamp
+    orderDirection: desc
+    where: { 
+      user: $userAddress
+      action_in: [UNSTAKE, BATCH_UNSTAKE]
+    }
+  ) {
+    id
+    action
+    tokenIds
+    level
+    amount        # 取消质押时获得的收益
+    timestamp
+    transactionHash
+  }
+}
+```
+
+### 9.3 创建历史记录 Hook
+
+```typescript
+// src/hooks/useStakingHistory.ts
+import { useQuery } from '@apollo/client';
+import { gql } from '@apollo/client';
+import { useState } from 'react';
+
+const GET_USER_STAKING_HISTORY = gql`
+  query GetUserStakingHistory(
+    $userAddress: Bytes!
+    $first: Int!
+    $skip: Int!
+    $actionFilter: [StakingAction!]
+  ) {
+    stakingActivities(
+      first: $first
+      skip: $skip
+      orderBy: timestamp
+      orderDirection: desc
+      where: { 
+        user: $userAddress
+        action_in: $actionFilter
+      }
+    ) {
+      id
+      action
+      tokenIds
+      level
+      amount
+      timestamp
+      blockNumber
+      transactionHash
+    }
+  }
+`;
+
+export const useStakingHistory = ({
+  userAddress,
+  pageSize = 20,
+  actionFilter = null
+}: {
+  userAddress: string;
+  pageSize?: number;
+  actionFilter?: string[] | null;
+}) => {
+  const [page, setPage] = useState(0);
+
+  const { loading, error, data } = useQuery(
+    GET_USER_STAKING_HISTORY,
+    {
+      variables: {
+        userAddress: userAddress.toLowerCase(),
+        first: pageSize,
+        skip: page * pageSize,
+        actionFilter,
+      },
+      pollInterval: 60000, // 每分钟刷新
+    }
+  );
+
+  const activities = data?.stakingActivities || [];
+
+  const loadMore = () => {
+    setPage(page + 1);
+  };
+
+  return {
+    activities,
+    loading,
+    error,
+    loadMore,
+    hasMore: activities.length === pageSize,
+  };
+};
+```
+
+### 9.4 创建历史记录组件
+
+```typescript
+// src/components/StakingHistory.tsx
+import React, { useState } from 'react';
+import { useStakingHistory } from '../hooks/useStakingHistory';
+import { ethers } from 'ethers';
+import './StakingHistory.css';
+
+export const StakingHistory: React.FC<{ userAddress: string }> = ({ 
+  userAddress 
+}) => {
+  const [actionFilter, setActionFilter] = useState<string[] | null>(null);
+  
+  const { activities, loading, error, loadMore, hasMore } = useStakingHistory({
+    userAddress,
+    pageSize: 20,
+    actionFilter,
+  });
+
+  // 格式化时间
+  const formatTime = (timestamp: string) => {
+    const date = new Date(parseInt(timestamp) * 1000);
+    return date.toLocaleString('zh-CN');
+  };
+
+  // 格式化金额
+  const formatAmount = (amount: string | null) => {
+    if (!amount) return '-';
+    return `${parseFloat(ethers.utils.formatEther(amount)).toFixed(4)} ETH`;
+  };
+
+  // 获取等级名称
+  const getLevelName = (level: number | null) => {
+    if (!level) return '-';
+    const levels = ['', 'C', 'B', 'A', 'S', 'SS', 'SSS'];
+    return levels[level] || '-';
+  };
+
+  // 获取操作类型信息
+  const getActionInfo = (action: string) => {
+    const actionMap: Record<string, { name: string; emoji: string; color: string }> = {
+      STAKE: { name: '质押', emoji: '⬆️', color: '#4caf50' },
+      UNSTAKE: { name: '取消质押', emoji: '⬇️', color: '#f44336' },
+      CLAIM: { name: '领取收益', emoji: '💰', color: '#ff9800' },
+      BATCH_STAKE: { name: '批量质押', emoji: '⬆️⬆️', color: '#66bb6a' },
+      BATCH_UNSTAKE: { name: '批量取消', emoji: '⬇️⬇️', color: '#ef5350' },
+      BATCH_CLAIM: { name: '批量领取', emoji: '💰💰', color: '#ffa726' },
+    };
+    return actionMap[action] || { name: action, emoji: '❓', color: '#999' };
+  };
+
+  if (loading && activities.length === 0) {
+    return <div className="loading">⏳ 加载历史记录...</div>;
+  }
+
+  if (error) {
+    return <div className="error">❌ 加载失败: {error.message}</div>;
+  }
+
+  return (
+    <div className="staking-history">
+      <h2>📜 质押历史</h2>
+
+      {/* 筛选器 */}
+      <div className="filter-bar">
+        <button
+          className={!actionFilter ? 'active' : ''}
+          onClick={() => setActionFilter(null)}
+        >
+          全部
+        </button>
+        <button
+          className={actionFilter?.includes('STAKE') ? 'active' : ''}
+          onClick={() => setActionFilter(['STAKE', 'BATCH_STAKE'])}
+        >
+          质押
+        </button>
+        <button
+          className={actionFilter?.includes('UNSTAKE') ? 'active' : ''}
+          onClick={() => setActionFilter(['UNSTAKE', 'BATCH_UNSTAKE'])}
+        >
+          取消质押
+        </button>
+        <button
+          className={actionFilter?.includes('CLAIM') ? 'active' : ''}
+          onClick={() => setActionFilter(['CLAIM', 'BATCH_CLAIM'])}
+        >
+          领取收益
+        </button>
+      </div>
+
+      {/* 历史记录列表 */}
+      <div className="history-list">
+        {activities.length === 0 ? (
+          <div className="no-data">暂无历史记录</div>
+        ) : (
+          <>
+            {activities.map((activity: any) => {
+              const actionInfo = getActionInfo(activity.action);
+              return (
+                <div key={activity.id} className="history-item">
+                  <div className="item-header">
+                    <span 
+                      className="action-badge"
+                      style={{ background: actionInfo.color }}
+                    >
+                      {actionInfo.emoji} {actionInfo.name}
+                    </span>
+                    <span className="timestamp">{formatTime(activity.timestamp)}</span>
+                  </div>
+                  
+                  <div className="item-body">
+                    <div className="info-row">
+                      <span className="label">NFT Token IDs:</span>
+                      <span className="value">
+                        {activity.tokenIds.map((id: string) => (
+                          <span key={id} className="token-badge">#{id}</span>
+                        ))}
+                      </span>
+                    </div>
+                    
+                    {activity.level && (
+                      <div className="info-row">
+                        <span className="label">等级:</span>
+                        <span className="value level">{getLevelName(activity.level)}</span>
+                      </div>
+                    )}
+                    
+                    {activity.amount && (
+                      <div className="info-row">
+                        <span className="label">收益:</span>
+                        <span className="value amount">{formatAmount(activity.amount)}</span>
+                      </div>
+                    )}
+                    
+                    <div className="info-row">
+                      <span className="label">交易:</span>
+                      <a
+                        href={`https://sepolia.etherscan.io/tx/${activity.transactionHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="tx-link"
+                      >
+                        {activity.transactionHash.slice(0, 10)}...{activity.transactionHash.slice(-8)} 🔗
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* 加载更多 */}
+            {hasMore && (
+              <div className="load-more">
+                <button onClick={loadMore} disabled={loading}>
+                  {loading ? '加载中...' : '加载更多'}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+```
+
+### 9.5 历史记录样式
+
+```css
+/* src/components/StakingHistory.css */
+.staking-history {
+  background: white;
+  padding: 25px;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  margin-top: 30px;
+}
+
+.staking-history h2 {
+  margin: 0 0 20px 0;
+  font-size: 1.5em;
+}
+
+/* 筛选器 */
+.filter-bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.filter-bar button {
+  padding: 8px 16px;
+  border: 2px solid #e0e0e0;
+  background: white;
+  border-radius: 20px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.filter-bar button.active {
+  background: #667eea;
+  color: white;
+  border-color: #667eea;
+}
+
+/* 历史记录列表 */
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.history-item {
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 15px;
+  transition: box-shadow 0.2s;
+}
+
+.history-item:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.action-badge {
+  display: inline-block;
+  color: white;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.timestamp {
+  color: #666;
+  font-size: 13px;
+}
+
+.item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.info-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.info-row .label {
+  color: #666;
+  font-weight: 500;
+  min-width: 80px;
+}
+
+.info-row .value {
+  color: #333;
+}
+
+.token-badge {
+  display: inline-block;
+  background: #f0f0f0;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  margin-right: 4px;
+}
+
+.value.level {
+  background: #667eea;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.value.amount {
+  color: #4caf50;
+  font-weight: 600;
+}
+
+.tx-link {
+  color: #667eea;
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.tx-link:hover {
+  text-decoration: underline;
+}
+
+/* 加载更多 */
+.load-more {
+  text-align: center;
+  margin-top: 20px;
+}
+
+.load-more button {
+  padding: 10px 24px;
+  background: #667eea;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.load-more button:hover:not(:disabled) {
+  background: #5568d3;
+}
+
+.load-more button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+```
+
+### 9.6 在主应用中使用
+
+```typescript
+// src/App.tsx
+import { StakingCharts } from './components/StakingCharts';
+import { StakingHistory } from './components/StakingHistory';
+
+function App() {
+  const userAddress = '0x01692d53f4392273bd2e11eac510832548957304';
+
+  return (
+    <ApolloProvider client={client}>
+      <div className="App">
+        <h1>NFT Staking Dashboard</h1>
+        
+        {/* 图表统计 */}
+        <StakingCharts 
+          userAddress={userAddress}
+          provider={provider}
+          stakingContractAddress={STAKING_CONTRACT_ADDRESS}
+          stakingAbi={STAKING_ABI}
+          hours={168}
+        />
+        
+        {/* 质押历史 */}
+        <StakingHistory userAddress={userAddress} />
+      </div>
+    </ApolloProvider>
+  );
+}
+```
+
+### 9.7 测试查询
+
+使用 curl 测试：
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "{ stakingActivities(first: 10, orderBy: timestamp, orderDirection: desc, where: { user: \"0x01692d53f4392273bd2e11eac510832548957304\" }) { id action tokenIds level amount timestamp transactionHash } }"
+  }' \
+  https://api.studio.thegraph.com/query/960/chapool-nft-staking-stats/v0.0.2
+```
+
+---
+
 ## 🚀 快速开始模板
 
 克隆这个模板开始：
@@ -1185,7 +1736,7 @@ const totalRewards = claimedRewards + pendingRewards;
 ```bash
 npx create-react-app nft-staking-dashboard --template typescript
 cd nft-staking-dashboard
-npm install @apollo/client graphql recharts
+npm install @apollo/client graphql recharts ethers
 ```
 
 然后复制上面的代码文件，运行：
