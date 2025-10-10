@@ -211,11 +211,120 @@ export const useStakingData = (userAddress: string, hours: number = 168) => {
 };
 ```
 
-#### 3.5 创建图表组件
+#### 3.4.1 创建完整收益数据 Hook（包含 Pending）
+
+⚠️ **重要**：上面的 Hook 只返回 Subgraph 数据（已领取收益）。要获取完整收益（已领取 + Pending），需要额外调用合约：
+
+```typescript
+// src/hooks/useCompleteStakingData.ts
+import { useEffect, useState } from 'react';
+import { useStakingData } from './useStakingData';
+import { ethers } from 'ethers';
+
+interface CompleteStakingData {
+  user: any;
+  claimedRewards: number;      // 已领取收益
+  pendingRewards: number;      // 待领取收益（Pending）
+  totalRewards: number;        // 总收益 = 已领取 + Pending
+  loading: boolean;
+  error: any;
+}
+
+export const useCompleteStakingData = (
+  userAddress: string,
+  provider: ethers.providers.Provider,
+  stakingContractAddress: string,
+  stakingAbi: any[],
+  hours: number = 168
+): CompleteStakingData => {
+  // 1. 从 Subgraph 获取已领取收益
+  const { user, loading: subgraphLoading, error } = useStakingData(userAddress, hours);
+  
+  // 2. 从合约获取 Pending 收益
+  const [pendingRewards, setPendingRewards] = useState<number>(0);
+  const [contractLoading, setContractLoading] = useState(true);
+
+  useEffect(() => {
+    if (!user || !provider) {
+      setContractLoading(false);
+      return;
+    }
+
+    const contract = new ethers.Contract(
+      stakingContractAddress,
+      stakingAbi,
+      provider
+    );
+
+    const fetchPendingRewards = async () => {
+      try {
+        setContractLoading(true);
+
+        // 方法 1: 如果合约有 getUserStakes 函数
+        // const userStakes = await contract.getUserStakes(userAddress);
+        
+        // 方法 2: 从 Subgraph activities 中获取 tokenIds
+        const stakedTokenIds = user.activities
+          ?.filter((a: any) => a.action === 'STAKE' || a.action === 'BATCH_STAKE')
+          .flatMap((a: any) => a.tokenIds)
+          .map((id: any) => id.toString()) || [];
+
+        if (stakedTokenIds.length === 0) {
+          setPendingRewards(0);
+          setContractLoading(false);
+          return;
+        }
+
+        let totalPending = ethers.BigNumber.from(0);
+        
+        // 计算每个 token 的 pending rewards
+        for (const tokenId of stakedTokenIds) {
+          try {
+            const pending = await contract.calculatePendingRewards(tokenId);
+            totalPending = totalPending.add(pending);
+          } catch (err) {
+            console.warn(`Failed to fetch pending for token ${tokenId}:`, err);
+          }
+        }
+
+        const pendingEth = parseFloat(ethers.utils.formatEther(totalPending));
+        setPendingRewards(pendingEth);
+      } catch (error) {
+        console.error('Failed to fetch pending rewards:', error);
+        setPendingRewards(0);
+      } finally {
+        setContractLoading(false);
+      }
+    };
+
+    fetchPendingRewards();
+    
+    // 每 10 秒刷新 pending rewards（实时性）
+    const interval = setInterval(fetchPendingRewards, 10000);
+    
+    return () => clearInterval(interval);
+  }, [user, userAddress, provider, stakingContractAddress, stakingAbi]);
+
+  const claimedRewards = user 
+    ? parseFloat(user.totalRewardsClaimedDecimal) 
+    : 0;
+
+  return {
+    user,
+    claimedRewards,
+    pendingRewards,
+    totalRewards: claimedRewards + pendingRewards,
+    loading: subgraphLoading || contractLoading,
+    error,
+  };
+};
+```
+
+#### 3.5 创建图表组件（包含 Pending 收益）
 
 ```typescript
 // src/components/StakingCharts.tsx
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   LineChart,
   Line,
@@ -226,44 +335,99 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts';
-import { useStakingData } from '../hooks/useStakingData';
+import { useCompleteStakingData } from '../hooks/useCompleteStakingData';
+import { ethers } from 'ethers';
 
 interface StakingChartsProps {
   userAddress: string;
+  provider: ethers.providers.Provider;
+  stakingContractAddress: string;
+  stakingAbi: any[];
   hours?: number; // 显示最近多少小时，默认 168（7天）
 }
 
 export const StakingCharts: React.FC<StakingChartsProps> = ({ 
-  userAddress, 
+  userAddress,
+  provider,
+  stakingContractAddress,
+  stakingAbi,
   hours = 168 
 }) => {
-  const { loading, error, user } = useStakingData(userAddress, hours);
-
-  if (loading) return <div>加载中...</div>;
-  if (error) return <div>加载失败: {error.message}</div>;
-  if (!user) return <div>未找到用户数据</div>;
+  const { 
+    user, 
+    claimedRewards,
+    pendingRewards,
+    totalRewards,
+    loading, 
+    error 
+  } = useCompleteStakingData(
+    userAddress,
+    provider,
+    stakingContractAddress,
+    stakingAbi,
+    hours
+  );
 
   // 转换数据格式供图表使用
-  const chartData = user.hourlyStats.map((stat) => ({
-    time: stat.hourStartString,
-    质押数量: parseInt(stat.netStaked),
-    累计收益: parseFloat(
-      (BigInt(stat.cumulativeRewards) / BigInt(10 ** 18)).toString()
-    ).toFixed(4), // 将 wei 转换为 ETH
-  }));
+  const chartData = useMemo(() => {
+    if (!user?.hourlyStats) return [];
+
+    return user.hourlyStats.map((stat: any, index: number, array: any[]) => {
+      const claimedRewardsAtHour = parseFloat(
+        ethers.utils.formatEther(stat.cumulativeRewards)
+      );
+
+      // 最后一个数据点加上当前的 pending rewards
+      const isLatest = index === array.length - 1;
+      const totalRewardsAtHour = isLatest 
+        ? claimedRewardsAtHour + pendingRewards 
+        : claimedRewardsAtHour;
+
+      return {
+        time: stat.hourStartString,
+        质押数量: parseInt(stat.netStaked),
+        已领取收益: claimedRewardsAtHour.toFixed(4),
+        总收益: totalRewardsAtHour.toFixed(4),
+      };
+    });
+  }, [user, pendingRewards]);
+
+  if (loading) return <div className="loading">⏳ 加载中...</div>;
+  if (error) return <div className="error">❌ 加载失败: {error.message}</div>;
+  if (!user) return <div className="no-data">⚠️ 未找到用户数据</div>;
 
   return (
     <div className="staking-charts">
       <h2>用户质押统计</h2>
+      
+      {/* 用户信息面板 */}
       <div className="user-info">
-        <p>地址: {user.id}</p>
-        <p>当前质押数量: {user.totalStaked}</p>
-        <p>已领取收益: {user.totalRewardsClaimedDecimal} ETH</p>
+        <div className="info-item">
+          <span className="label">地址:</span>
+          <span className="value">{user.id}</span>
+        </div>
+        <div className="info-item">
+          <span className="label">当前质押数量:</span>
+          <span className="value">{user.totalStaked} NFT</span>
+        </div>
+        <div className="info-item">
+          <span className="label">已领取收益:</span>
+          <span className="value claimed">{claimedRewards.toFixed(4)} ETH</span>
+        </div>
+        <div className="info-item">
+          <span className="label">待领取收益:</span>
+          <span className="value pending">{pendingRewards.toFixed(4)} ETH</span>
+          <span className="badge">实时</span>
+        </div>
+        <div className="info-item total">
+          <span className="label">总收益:</span>
+          <span className="value">{totalRewards.toFixed(4)} ETH</span>
+        </div>
       </div>
 
       {/* 图表 1: 每小时质押数量 */}
       <div className="chart-container">
-        <h3>每小时质押数量</h3>
+        <h3>📊 每小时质押数量</h3>
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" />
@@ -272,6 +436,7 @@ export const StakingCharts: React.FC<StakingChartsProps> = ({
               angle={-45}
               textAnchor="end"
               height={80}
+              style={{ fontSize: '12px' }}
             />
             <YAxis />
             <Tooltip />
@@ -282,14 +447,18 @@ export const StakingCharts: React.FC<StakingChartsProps> = ({
               stroke="#8884d8" 
               strokeWidth={2}
               dot={{ r: 4 }}
+              activeDot={{ r: 6 }}
             />
           </LineChart>
         </ResponsiveContainer>
       </div>
 
-      {/* 图表 2: 每小时累积收益 */}
+      {/* 图表 2: 每小时累积收益（包含 Pending） */}
       <div className="chart-container">
-        <h3>每小时累积收益 (ETH)</h3>
+        <h3>💰 每小时累积收益 (ETH)</h3>
+        <p className="chart-hint">
+          实线 = 已领取 | 虚线 = 总收益（含待领取）
+        </p>
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" />
@@ -298,16 +467,29 @@ export const StakingCharts: React.FC<StakingChartsProps> = ({
               angle={-45}
               textAnchor="end"
               height={80}
+              style={{ fontSize: '12px' }}
             />
             <YAxis />
             <Tooltip />
             <Legend />
+            {/* 已领取收益 - 实线 */}
             <Line 
               type="monotone" 
-              dataKey="累计收益" 
+              dataKey="已领取收益" 
               stroke="#82ca9d" 
               strokeWidth={2}
               dot={{ r: 4 }}
+              activeDot={{ r: 6 }}
+            />
+            {/* 总收益（含 Pending）- 虚线 */}
+            <Line 
+              type="monotone" 
+              dataKey="总收益" 
+              stroke="#ff7300" 
+              strokeWidth={2}
+              strokeDasharray="5 5"
+              dot={{ r: 4 }}
+              activeDot={{ r: 6 }}
             />
           </LineChart>
         </ResponsiveContainer>
@@ -321,24 +503,42 @@ export const StakingCharts: React.FC<StakingChartsProps> = ({
 
 ```typescript
 // src/App.tsx
-import React from 'react';
+import React, { useState } from 'react';
 import { ApolloProvider } from '@apollo/client';
+import { ethers } from 'ethers';
 import { client } from './apollo/client';
 import { StakingCharts } from './components/StakingCharts';
+import STAKING_ABI from './abis/Staking.json';
 import './App.css';
+
+// 合约配置
+const STAKING_CONTRACT_ADDRESS = '0x51a07dE2Bd277F0E6412452e3B54982Fc32CA6E5';
+const RPC_URL = 'https://sepolia.infura.io/v3/YOUR_INFURA_KEY'; // 替换为您的 RPC
 
 function App() {
   // 示例用户地址
-  const userAddress = '0x01692d53f4392273bd2e11eac510832548957304';
+  const [userAddress] = useState('0x01692d53f4392273bd2e11eac510832548957304');
+  
+  // 创建 provider
+  const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
 
   return (
     <ApolloProvider client={client}>
       <div className="App">
-        <h1>NFT Staking Dashboard</h1>
-        <StakingCharts 
-          userAddress={userAddress} 
-          hours={168} // 显示最近 7 天
-        />
+        <header>
+          <h1>🎨 NFT Staking Dashboard</h1>
+          <p className="subtitle">实时监控您的质押收益</p>
+        </header>
+        
+        <main>
+          <StakingCharts 
+            userAddress={userAddress}
+            provider={provider}
+            stakingContractAddress={STAKING_CONTRACT_ADDRESS}
+            stakingAbi={STAKING_ABI}
+            hours={168} // 显示最近 7 天
+          />
+        </main>
       </div>
     </ApolloProvider>
   );
@@ -347,40 +547,220 @@ function App() {
 export default App;
 ```
 
+**使用 MetaMask provider（推荐）：**
+
+```typescript
+// 如果用户已连接 MetaMask
+import { ethers } from 'ethers';
+
+function App() {
+  const [userAddress, setUserAddress] = useState('');
+  const [provider, setProvider] = useState<ethers.providers.Web3Provider | null>(null);
+
+  useEffect(() => {
+    const initProvider = async () => {
+      if (window.ethereum) {
+        const web3Provider = new ethers.providers.Web3Provider(window.ethereum);
+        const accounts = await web3Provider.send('eth_requestAccounts', []);
+        setProvider(web3Provider);
+        setUserAddress(accounts[0]);
+      }
+    };
+    
+    initProvider();
+  }, []);
+
+  if (!provider || !userAddress) {
+    return <div>请连接钱包...</div>;
+  }
+
+  return (
+    <ApolloProvider client={client}>
+      <div className="App">
+        <h1>NFT Staking Dashboard</h1>
+        <StakingCharts 
+          userAddress={userAddress}
+          provider={provider}
+          stakingContractAddress={STAKING_CONTRACT_ADDRESS}
+          stakingAbi={STAKING_ABI}
+          hours={168}
+        />
+      </div>
+    </ApolloProvider>
+  );
+}
+```
+
 #### 3.7 样式文件
 
 ```css
 /* src/App.css */
-.staking-charts {
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  background: #f0f2f5;
+}
+
+.App {
+  min-height: 100vh;
+}
+
+header {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 40px 20px;
+  text-align: center;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+header h1 {
+  margin: 0 0 10px 0;
+  font-size: 2.5em;
+}
+
+header .subtitle {
+  margin: 0;
+  opacity: 0.9;
+  font-size: 1.1em;
+}
+
+main {
   max-width: 1200px;
   margin: 0 auto;
   padding: 20px;
 }
 
+.staking-charts {
+  margin-top: 20px;
+}
+
+.staking-charts > h2 {
+  font-size: 1.8em;
+  margin-bottom: 20px;
+  color: #333;
+}
+
+/* 用户信息面板 */
 .user-info {
-  background: #f5f5f5;
-  padding: 15px;
-  border-radius: 8px;
+  background: white;
+  padding: 25px;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
   margin-bottom: 30px;
 }
 
-.user-info p {
-  margin: 5px 0;
-  font-size: 14px;
+.info-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f0f0;
 }
 
+.info-item:last-child {
+  border-bottom: none;
+}
+
+.info-item.total {
+  padding-top: 15px;
+  margin-top: 10px;
+  border-top: 2px solid #667eea;
+  border-bottom: none;
+  font-weight: bold;
+  font-size: 1.1em;
+}
+
+.info-item .label {
+  color: #666;
+  font-weight: 500;
+}
+
+.info-item .value {
+  font-weight: 600;
+  font-size: 1.1em;
+  color: #333;
+}
+
+.info-item .value.claimed {
+  color: #82ca9d;
+}
+
+.info-item .value.pending {
+  color: #ff7300;
+}
+
+.badge {
+  display: inline-block;
+  background: #ff7300;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.75em;
+  margin-left: 8px;
+  font-weight: 500;
+}
+
+/* 图表容器 */
 .chart-container {
   background: white;
-  padding: 20px;
-  border-radius: 8px;
+  padding: 25px;
+  border-radius: 12px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
   margin-bottom: 30px;
 }
 
 .chart-container h3 {
   margin-top: 0;
-  margin-bottom: 20px;
+  margin-bottom: 10px;
   color: #333;
+  font-size: 1.4em;
+}
+
+.chart-hint {
+  color: #666;
+  font-size: 0.9em;
+  margin: 0 0 15px 0;
+  font-style: italic;
+}
+
+/* 加载和错误状态 */
+.loading, .error, .no-data {
+  text-align: center;
+  padding: 60px 20px;
+  font-size: 1.2em;
+}
+
+.loading {
+  color: #667eea;
+}
+
+.error {
+  color: #e53e3e;
+}
+
+.no-data {
+  color: #f6ad55;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  header h1 {
+    font-size: 1.8em;
+  }
+  
+  .chart-container {
+    padding: 15px;
+  }
+  
+  .info-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
+  }
 }
 ```
 
@@ -537,6 +917,41 @@ export default App;
 </body>
 </html>
 ```
+
+---
+
+## ⚠️ 重要：Subgraph 限制说明
+
+### Subgraph 只记录已领取的收益
+
+**关键理解：**
+
+The Graph Subgraph 是**事件驱动**的索引服务，只能：
+- ✅ 监听链上事件（如 `NFTStaked`, `RewardsClaimed`, `NFTUnstaked`）
+- ✅ 记录历史已发生的数据
+- ❌ **不能**定时执行任务
+- ❌ **不能**主动调用合约的 view 函数
+- ❌ **不能**实时计算 Pending 收益
+
+**对您的影响：**
+
+```typescript
+// Subgraph 返回的数据
+user {
+  totalRewardsClaimedDecimal: "0"  // ✅ 已领取的收益
+  // ❌ 不包含：正在累积的 Pending 收益
+}
+```
+
+**Pending 收益只有在以下情况才会进入 Subgraph：**
+1. 用户调用 `claimRewards()` 领取收益
+2. 用户调用 `unstake()` 取消质押（自动结算收益）
+
+**要显示完整收益（已领取 + Pending），需要组合两个数据源：**
+- **Subgraph** → 历史已领取收益
+- **合约调用** → 当前 Pending 收益
+
+详细说明请参考：[SUBGRAPH_LIMITATIONS.md](./SUBGRAPH_LIMITATIONS.md)
 
 ---
 
@@ -724,6 +1139,30 @@ fetch('https://api.studio.thegraph.com/query/960/chapool-nft-staking-stats/v0.0.
 - `netStaked`: 数量（整数）
 - `cumulativeRewards`: wei（需要除以 10^18 转换为 ETH）
 - `rewardsClaimedDecimal`: 已经转换为 ETH 的字符串
+
+### Q3.1: Subgraph 返回的收益包含 Pending 吗？
+**A:** ❌ **不包含！** 这是最常见的误解。
+
+**Subgraph 只记录：**
+- ✅ 用户调用 `claimRewards()` 时领取的收益
+- ✅ 用户调用 `unstake()` 时自动结算的收益
+
+**Subgraph 不记录：**
+- ❌ 正在累积但还没领取的 Pending 收益
+
+**要显示完整收益，必须：**
+```typescript
+// 1. 从 Subgraph 获取已领取
+const claimedRewards = user.totalRewardsClaimedDecimal;
+
+// 2. 从合约获取 Pending
+const pendingRewards = await contract.calculatePendingRewards(tokenId);
+
+// 3. 相加得到总收益
+const totalRewards = claimedRewards + pendingRewards;
+```
+
+详见：[SUBGRAPH_LIMITATIONS.md](./SUBGRAPH_LIMITATIONS.md)
 
 ### Q4: 如何显示不同时间范围？
 **A:** 修改 `hoursToFetch` 参数：
