@@ -377,7 +377,9 @@ export const StakingCharts: React.FC<StakingChartsProps> = ({
         ethers.utils.formatEther(stat.cumulativeRewards)
       );
 
-      // 最后一个数据点加上当前的 pending rewards
+      // ⚠️ 重要：只在最后一个数据点加上当前的 pending rewards
+      // 原因：pendingRewards 是"当前时刻"的值，无法获取历史每个时刻的 pending
+      // 所以历史数据只显示已领取收益，最新数据显示已领取+pending
       const isLatest = index === array.length - 1;
       const totalRewardsAtHour = isLatest 
         ? claimedRewardsAtHour + pendingRewards 
@@ -1175,6 +1177,116 @@ const totalRewards = claimedRewards + pendingRewards;
 - 限制数据点数量（不超过 1000 个点）
 - 使用虚拟滚动
 - 按需加载数据（分页）
+
+### Q6: ⚠️ 为什么折线图不能显示历史每小时的"总收益（含pending）"？
+
+**问题：** 我想画一个折线图，每个小时的数据点都显示 `已领取收益 + Pending 收益`，但为什么做不到？
+
+**原因：** 这是技术上的**根本限制**，不是实现问题！
+
+```typescript
+// ❌ 这样做是错误的！
+const chartData = hourlyStats.map(stat => ({
+  time: stat.hourStartString,
+  total: stat.claimedRewards + currentPendingRewards  // ❌ 错误！
+}));
+
+// 问题：currentPendingRewards 是"现在"的值（比如 100 ETH）
+// 但历史每个小时的 pending 是不同的：
+// - 3小时前: pending 可能是 70 ETH
+// - 2小时前: pending 可能是 80 ETH
+// - 1小时前: pending 可能是 90 ETH
+// - 现在:     pending 是 100 ETH
+```
+
+**为什么无法获取历史 Pending？**
+
+1. **Pending Rewards 的本质**：
+   ```
+   Pending = (当前时间 - 质押开始时间) × 收益率
+   ```
+   - 它是一个**计算值**，依赖于"当前时间"
+   - 过去某时刻的 pending 已经"消失"了（要么被领取，要么继续累积）
+
+2. **Subgraph 的限制**：
+   - Subgraph 只能记录**已发生的事件**
+   - Pending 没有事件，无法记录历史快照
+
+3. **除非**：
+   - 合约每小时触发一次快照事件（需要 Chainlink Automation，成本高）
+   - 或者你在过去就开始记录 pending（现在已经来不及了）
+
+**✅ 正确的图表方案**：
+
+**方案 A：只在最新点显示总收益**（推荐 ⭐）
+
+```typescript
+const chartData = hourlyStats.map((stat, index, array) => {
+  const claimed = parseFloat(ethers.utils.formatEther(stat.cumulativeRewards));
+  const isLatest = index === array.length - 1;
+  
+  return {
+    time: stat.hourStartString,
+    已领取: claimed,
+    总收益: isLatest ? claimed + currentPending : claimed, // 只在最新点加 pending
+  };
+});
+```
+
+**效果**：
+```
+图表展示：
+     ↗ (总收益，虚线，最新点跳起)
+   ↗
+ ↗ (已领取，实线，平滑增长)
+```
+
+**方案 B：两条独立的线**
+
+```typescript
+// 线1：历史已领取（来自 Subgraph）
+const claimedLine = hourlyStats.map(stat => ({
+  time: stat.hourStartString,
+  value: parseFloat(ethers.utils.formatEther(stat.cumulativeRewards)),
+}));
+
+// 线2：理论总收益（基于质押时间推算）
+const theoreticalLine = hourlyStats.map(stat => {
+  const claimed = parseFloat(ethers.utils.formatEther(stat.cumulativeRewards));
+  const hoursSinceStart = calculateHoursSince(stat.hour, user.firstStakeTimestamp);
+  const estimatedPending = hoursSinceStart * rewardRatePerHour;
+  return {
+    time: stat.hourStartString,
+    value: claimed + estimatedPending,
+  };
+});
+```
+
+**方案 C：分离显示**（最清晰 ⭐⭐⭐）
+
+```typescript
+// 图表只显示历史已领取
+<LineChart data={hourlyStats}>
+  <Line dataKey="cumulativeRewards" name="已领取收益" stroke="#8884d8" />
+</LineChart>
+
+// 卡片单独显示当前收益
+<div className="current-rewards">
+  <div>已领取: {claimedRewards} ETH</div>
+  <div>待领取: {pendingRewards} ETH</div>
+  <div>总收益: {totalRewards} ETH</div>
+</div>
+```
+
+**推荐方案 C**，因为：
+1. ✅ 语义清晰：图表=历史趋势，卡片=当前状态
+2. ✅ 数据准确：不会误导用户
+3. ✅ 用户友好：一眼看懂
+
+**总结**：
+- ❌ 无法在折线图的每个历史点都显示准确的"总收益（含pending）"
+- ✅ 只能在最新点显示总收益，或分离展示
+- 💡 这不是 bug，是 Pending Rewards 的本质特性
 
 ---
 
