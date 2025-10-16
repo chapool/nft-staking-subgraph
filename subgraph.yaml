@@ -29,9 +29,11 @@ dataSources:
           handler: handleNFTUnstaked
         - event: RewardsClaimed(indexed address,indexed uint256,uint256,uint256)
           handler: handleRewardsClaimed
-        - event: BatchStaked(indexed address,uint256[],uint256)
-          handler: handleBatchStaked
-        - event: BatchUnstaked(indexed address,uint256[],uint256,uint256)
-          handler: handleBatchUnstaked
+        # BatchStaked 和 BatchUnstaked 会触发单独的 NFTStaked/NFTUnstaked 事件
+        # 为避免重复计数，只监听单个事件即可
+        # - event: BatchStaked(indexed address,uint256[],uint256)
+        #   handler: handleBatchStaked
+        # - event: BatchUnstaked(indexed address,uint256[],uint256,uint256)
+        #   handler: handleBatchUnstaked
       file: ./src/mapping.ts
 
